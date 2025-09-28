@@ -1,47 +1,36 @@
 # Build stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.22-alpine AS builder
 
-# Install git for go mod download
-RUN apk add --no-cache git
+ENV CGO_ENABLED=0
 
-# Set working directory
 WORKDIR /app
 
-# Copy go mod files
+# Copy go mod files first to leverage layer caching
 COPY go.mod go.sum ./
-
-# Download dependencies
 RUN go mod download
 
-# Copy source code
+# Copy the remaining source code and build the binary
 COPY . .
-
-# Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o playsock .
+RUN go build -trimpath -ldflags "-s -w" -o /out/playsock ./
 
 # Runtime stage
-FROM alpine:latest
+FROM alpine:3.20
 
-# Install ca-certificates for HTTPS requests
-RUN apk --no-cache add ca-certificates
+# Install runtime dependencies and create an unprivileged user
+RUN apk --no-cache add ca-certificates wget \
+    && addgroup -g 1001 -S appuser \
+    && adduser -u 1001 -S appuser -G appuser
 
-# Create non-root user
-RUN addgroup -g 1001 -S appuser && \
-    adduser -u 1001 -S appuser -G appuser
+WORKDIR /app
 
-WORKDIR /root/
+# Copy the statically linked binary
+COPY --from=builder --chown=appuser:appuser /out/playsock ./playsock
 
-# Copy the binary from builder stage
-COPY --from=builder /app/playsock .
-
-# Change ownership to non-root user
-RUN chown appuser:appuser playsock
-
-# Switch to non-root user
 USER appuser
 
-# Expose port
 EXPOSE 8080
 
-# Run the application
-CMD ["./playsock"]
+# Simple container healthcheck for orchestration platforms
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD wget -q -O- http://127.0.0.1:8080/healthz || exit 1
+
+ENTRYPOINT ["/app/playsock"]

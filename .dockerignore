@@ -1,0 +1,11 @@
+.git
+.idea
+.vscode
+*.log
+README.md
+DEPLOY.md
+Makefile
+bin
+.tmp
+vendor
+**/*.test

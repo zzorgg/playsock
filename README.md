@@ -11,6 +11,7 @@ A realtime WebSocket server written in Go that pairs mobile players into head-to
 - Relays score updates and opponent answers in realtime.
 - Detects disconnects and awards a walkover victory to the remaining player.
 - Sends end-of-match summaries for clients to validate before finalising Anchor transactions.
+- Exposes a JSON health check at `GET /healthz` to plug into load balancers or DigitalOcean App Platform probes.
 
 ## Quick start
 
@@ -32,6 +33,8 @@ Environment variables:
 | `PLAYSOCK_REDIS_QUEUE_KEY` | `playsock:queue` | Hash key used to track queued players. |
 | `PLAYSOCK_REDIS_SESSION_PREFIX` | `playsock:session` | Key prefix for active session snapshots. |
 | `PLAYSOCK_REDIS_TIMEOUT` | `2s` | Operation timeout (parseable by `time.ParseDuration`). |
+| `PLAYSOCK_QUEUE_TIMEOUT` | `5m` | Max time a player can remain queued before being timed out. |
+| `PLAYSOCK_SHUTDOWN_TIMEOUT` | `10s` | Grace period for draining active connections during shutdown. |
 
 When Redis is configured the server writes each queue join/remove into `PLAYSOCK_REDIS_QUEUE_KEY` and snapshots active sessions under `PLAYSOCK_REDIS_SESSION_PREFIX:<match_id>`. This keeps per-player WebSocket state locally while sharing high-level metadata across nodes.
 
@@ -71,3 +74,22 @@ All frames are UTF-8 JSON encoded envelopes:
 - Run tests: `go test ./...`
 
 Unit tests cover matchmaking, score tracking, and disconnect handling logic without requiring live WebSocket connections.
+
+## Docker
+
+The repository ships with a production-ready multi-stage `Dockerfile`. To build and run the container locally:
+
+```bash
+docker build -t playsock:latest .
+docker run --rm -p 8080:8080 \
+  -e PLAYSOCK_ALLOWED_ORIGINS="https://your-frontend.example" \
+  playsock:latest
+```
+
+For local development with Redis, use the provided Compose file:
+
+```bash
+docker compose up --build
+```
+
+The container runs as a non-root user and exposes port `8080`. Health checks hit `/healthz` and can be wired into orchestrators such as DigitalOcean App Platform, Kubernetes, or Docker Swarm.

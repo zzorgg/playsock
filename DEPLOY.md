@@ -29,19 +29,25 @@ There are two main ways to deploy your WebSocket server to DigitalOcean:
 3. **Configure the App**:
    - **Service Type**: Web Service
    - **Source Directory**: `/` (root)
-   - **Build Command**: Leave empty (Docker will handle it)
-   - **Run Command**: Leave empty (Docker will handle it)
-   - **Port**: 8080
+   - **Environment**: Dockerfile
    - **HTTP Port**: 8080
+   - **Health Check Path**: `/healthz`
+   - **Health Check Protocol/Port**: HTTP on 8080
 
 4. **Add Redis Database** (Optional but recommended):
    - In the app configuration, click "Add Resource"
    - Select "Database" → "Redis"
    - Choose plan (Dev plan is free)
 
-5. **Environment Variables**:
-   - Add `PLAYSOCK_ALLOWED_ORIGINS` = `*` (or your domain)
-   - If using Redis database, add `PLAYSOCK_REDIS_ADDR` = `${redis.HOSTNAME}:${redis.PORT}`
+5. **Environment Variables** (suggested defaults):
+
+   | Key | Example | Notes |
+   |-----|---------|-------|
+   | `PLAYSOCK_ALLOWED_ORIGINS` | `https://playsock.yourdomain.com` | Lock this down to your production frontend origin. |
+   | `PLAYSOCK_QUEUE_TIMEOUT` | `5m` | Increase if you anticipate longer matchmaking windows. |
+   | `PLAYSOCK_REDIS_ADDR` | `${redis.HOSTNAME}:${redis.PORT}` | Provided automatically when you attach a managed Redis instance. |
+   | `PLAYSOCK_REDIS_PASSWORD` | `${redis.PASSWORD}` | Required when using managed Redis. |
+   | `PLAYSOCK_SHUTDOWN_TIMEOUT` | `15s` | Optional, allows App Platform graceful shutdowns to drain connections. |
 
 6. **Deploy**:
    - Review configuration
@@ -95,8 +101,8 @@ wss://your-app-name-xxxxx.ondigitalocean.app/ws
    git clone https://github.com/yourusername/playsock.git
    cd playsock
    
-   # Build and run with Docker Compose
-   docker-compose up -d
+   # Build and run with Docker Compose (uses the production Dockerfile)
+   docker compose up --build -d
    ```
 
 5. **Configure Firewall**:
@@ -136,6 +142,10 @@ wss://your-app-name-xxxxx.ondigitalocean.app/ws
            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
            proxy_set_header X-Forwarded-Proto $scheme;
        }
+
+      location /healthz {
+         proxy_pass http://localhost:8080/healthz;
+      }
    }
    EOF
    
@@ -165,8 +175,8 @@ wscat -c wss://your-app-url/ws
 # or
 wscat -c ws://your-droplet-ip:8080/ws
 
-# Send test message
-{"action": "search_match"}
+# Join the matchmaking queue
+{"action": "join_queue", "data": {"player_id": "alice", "display_name": "Alice"}}
 ```
 
 ## Monitoring & Logs
@@ -177,7 +187,7 @@ wscat -c ws://your-droplet-ip:8080/ws
 ### Droplet:
 ```bash
 # View container logs
-docker-compose logs -f playsock
+docker compose logs -f playsock
 
 # View system resources
 htop
@@ -191,13 +201,16 @@ docker stats
 
 ## Security Recommendations
 
-1. **Use environment variables** for sensitive data
-2. **Enable CORS** properly (don't use `*` in production)
-3. **Use HTTPS/WSS** in production
-4. **Regular updates** of dependencies
-5. **Monitor logs** for suspicious activity
+1. **Lock down origins** — configure `PLAYSOCK_ALLOWED_ORIGINS` with exact production domains.
+2. **Keep secrets in App Platform** — store Redis credentials and other secrets in DigitalOcean's encrypted env var store.
+3. **Force HTTPS/WSS** in production (App Platform terminates TLS automatically; for droplets use nginx + certbot).
+4. **Patch regularly** — rebuild the Docker image to pull patched base layers and Go runtime.
+5. **Monitor and alert** — pipe logs to DigitalOcean Logs or a third-party (Vector, Papertrail) and set alerts on error spikes.
+6. **Minimum privileges** — the container runs as an unprivileged user by default; avoid mounting host volumes with write access unless required.
 
-## Scaling
+## Scaling & Operations
 
-- **App Platform**: Auto-scales based on traffic
-- **Droplet**: Manually resize or add load balancer for multiple droplets
+- **App Platform**: Enable autoscaling and set min/max instance counts. Health check (`/healthz`) keeps bad instances out of rotation.
+- **Droplet**: Add a DigitalOcean Load Balancer in front of multiple droplets. Point each droplet at the same Redis instance so matchmaking state is shared.
+- **Redis**: Use managed Redis for persistence and monitoring. If self-hosting, enable persistence (`--appendonly yes`) and backups.
+- **Backups**: Snapshot droplets before major updates and export App Platform configs using `doctl apps spec get`.

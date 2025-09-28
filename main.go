@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"playsock/internal/server"
@@ -25,6 +29,15 @@ func main() {
 			if trimmed != "" {
 				origins = append(origins, trimmed)
 			}
+		}
+	}
+
+	queueTimeout := 5 * time.Minute
+	if timeoutRaw := os.Getenv("PLAYSOCK_QUEUE_TIMEOUT"); timeoutRaw != "" {
+		if dur, err := time.ParseDuration(timeoutRaw); err == nil && dur > 0 {
+			queueTimeout = dur
+		} else {
+			log.Printf("invalid PLAYSOCK_QUEUE_TIMEOUT value %q: %v", timeoutRaw, err)
 		}
 	}
 
@@ -62,15 +75,53 @@ func main() {
 
 	cfg := server.Config{
 		AllowedOrigins: origins,
-		QueueTimeout:   5 * time.Minute,
+		QueueTimeout:   queueTimeout,
 		Redis:          redisCfg,
 	}
 
 	wsServer := server.New(cfg)
-	http.HandleFunc("/ws", wsServer.HandleWS)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", wsServer.HandleWS)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	shutdownTimeout := 10 * time.Second
+	if timeoutRaw := os.Getenv("PLAYSOCK_SHUTDOWN_TIMEOUT"); timeoutRaw != "" {
+		if dur, err := time.ParseDuration(timeoutRaw); err == nil && dur > 0 {
+			shutdownTimeout = dur
+		} else {
+			log.Printf("invalid PLAYSOCK_SHUTDOWN_TIMEOUT value %q: %v", timeoutRaw, err)
+		}
+	}
+
+	go func() {
+		<-ctx.Done()
+		stop()
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("graceful shutdown failed: %v", err)
+		}
+	}()
 
 	log.Printf("playsock websocket server listening on %s", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server stopped: %v", err)
 	}
+
+	log.Printf("server shut down cleanly")
 }
