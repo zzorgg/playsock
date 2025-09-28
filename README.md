@@ -6,12 +6,12 @@ A realtime WebSocket server written in Go that pairs mobile players into head-to
 
 - Accepts WebSocket connections from Kotlin (or any) clients at `GET /ws`.
 - Maintains a matchmaking queue and automatically pairs the next two compatible players (optionally filtered by bet token/amount).
-- Optionally mirrors queue and session metadata into Redis so multiple server instances share visibility and analytics.
+- Optionally mirrors queue and session metadata into Valkey so multiple server instances share visibility and analytics.
 - Creates lightweight game sessions that track both players, their scores, round information, and bet metadata.
 - Relays score updates and opponent answers in realtime.
 - Detects disconnects and awards a walkover victory to the remaining player.
 - Sends end-of-match summaries for clients to validate before finalising Anchor transactions.
-- Exposes a JSON health check at `GET /healthz` to plug into load balancers or DigitalOcean App Platform probes.
+  
 
 ## Quick start
 
@@ -25,18 +25,18 @@ Environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PLAYSOCK_ADDR` | `:8080` | HTTP bind address. |
-| `PLAYSOCK_ALLOWED_ORIGINS` | *(accept all)* | Comma-separated list of exact origins allowed to upgrade. Leave empty during development. |
-| `PLAYSOCK_REDIS_ADDR` | *(disabled)* | Redis connection string (`host:port`). When set, matchmaking metadata is mirrored into Redis. |
-| `PLAYSOCK_REDIS_USERNAME` | *(empty)* | Optional username for Redis ACL authentication. |
-| `PLAYSOCK_REDIS_PASSWORD` | *(empty)* | Optional password/ACL token. |
-| `PLAYSOCK_REDIS_DB` | `0` | Numeric Redis database index. |
-| `PLAYSOCK_REDIS_QUEUE_KEY` | `playsock:queue` | Hash key used to track queued players. |
-| `PLAYSOCK_REDIS_SESSION_PREFIX` | `playsock:session` | Key prefix for active session snapshots. |
-| `PLAYSOCK_REDIS_TIMEOUT` | `2s` | Operation timeout (parseable by `time.ParseDuration`). |
+| `PLAYSOCK_ALLOWED_ORIGINS` | *(accept all)* | Comma-separated list of exact origins allowed to upgrade. For native mobile clients, supply the scheme/host they emit (e.g. `playsock-mobile://app`). Leave empty or set to `*` only when your clients cannot set an Origin header. |
+| `PLAYSOCK_VALKEY_ADDR` | *(disabled)* | Valkey connection string (`host:port`). Enables shared matchmaking metadata. |
+| `PLAYSOCK_VALKEY_USERNAME` | *(empty)* | Optional username for ACL authentication. |
+| `PLAYSOCK_VALKEY_PASSWORD` | *(empty)* | Optional password/ACL token. |
+| `PLAYSOCK_VALKEY_DB` | `0` | Numeric logical database index. |
+| `PLAYSOCK_VALKEY_QUEUE_KEY` | `playsock:queue` | Hash key used to track queued players. |
+| `PLAYSOCK_VALKEY_SESSION_PREFIX` | `playsock:session` | Key prefix for active session snapshots. |
+| `PLAYSOCK_VALKEY_TIMEOUT` | `2s` | Operation timeout (parseable by `time.ParseDuration`). |
 | `PLAYSOCK_QUEUE_TIMEOUT` | `5m` | Max time a player can remain queued before being timed out. |
 | `PLAYSOCK_SHUTDOWN_TIMEOUT` | `10s` | Grace period for draining active connections during shutdown. |
 
-When Redis is configured the server writes each queue join/remove into `PLAYSOCK_REDIS_QUEUE_KEY` and snapshots active sessions under `PLAYSOCK_REDIS_SESSION_PREFIX:<match_id>`. This keeps per-player WebSocket state locally while sharing high-level metadata across nodes.
+When Valkey is configured the server writes each queue join/remove into `PLAYSOCK_VALKEY_QUEUE_KEY` and snapshots active sessions under `PLAYSOCK_VALKEY_SESSION_PREFIX:<match_id>`.
 
 ## WebSocket contract
 
@@ -86,7 +86,7 @@ docker run --rm -p 8080:8080 \
   playsock:latest
 ```
 
-For local development with Redis, use the provided Compose file:
+For local development with Valkey, use the provided Compose file:
 
 ```bash
 docker compose up --build

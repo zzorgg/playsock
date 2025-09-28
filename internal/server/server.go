@@ -13,7 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/redis/go-redis/v9"
+	"github.com/valkey-io/valkey-go"
 )
 
 var jsonPool = sync.Pool{
@@ -32,9 +32,9 @@ const (
 )
 
 const (
-	defaultRedisQueueKey   = "playsock:queue"
-	defaultRedisSessionKey = "playsock:session"
-	defaultRedisOpTimeout  = 2 * time.Second
+	defaultValkeyQueueKey   = "playsock:queue"
+	defaultValkeySessionKey = "playsock:session"
+	defaultValkeyOpTimeout  = 2 * time.Second
 )
 
 // Action names the server understands.
@@ -140,12 +140,15 @@ type Config struct {
 	AllowedOrigins []string
 	// QueueTimeout optionally bounds how long a player can idle in the queue.
 	QueueTimeout time.Duration
-	// Redis holds connection information for coordinating state across instances.
-	Redis *RedisConfig
+	// Valkey holds connection information for coordinating state across instances.
+	Valkey *ValkeyConfig
+	// Redis is deprecated; kept for backward compatibility with older env vars.
+	// If both Valkey and Redis are provided, Valkey takes precedence.
+	Redis *ValkeyConfig // deprecated legacy name
 }
 
-// RedisConfig captures the connection parameters for Redis integration.
-type RedisConfig struct {
+// ValkeyConfig captures the connection parameters for Valkey integration.
+type ValkeyConfig struct {
 	Addr             string
 	Username         string
 	Password         string
@@ -155,10 +158,10 @@ type RedisConfig struct {
 	OperationTimeout time.Duration
 }
 
-type redisStore interface {
-	queueAdd(entry redisQueueEntry) error
+type valkeyStore interface {
+	queueAdd(entry valkeyQueueEntry) error
 	queueRemove(playerID string) error
-	sessionSave(record redisSessionRecord) error
+	sessionSave(record valkeySessionRecord) error
 	sessionDelete(matchID string) error
 }
 
@@ -171,11 +174,16 @@ type Server struct {
 
 // New constructs a Server with sensible defaults.
 func New(cfg Config) *Server {
-	var store redisStore
-	if cfg.Redis != nil && cfg.Redis.Addr != "" {
-		adapter, err := newRedisAdapter(*cfg.Redis)
+	var store valkeyStore
+	// Prefer explicit Valkey config. Fall back to deprecated Redis field if present.
+	vc := cfg.Valkey
+	if vc == nil && cfg.Redis != nil {
+		vc = cfg.Redis
+	}
+	if vc != nil && vc.Addr != "" {
+		adapter, err := newValkeyAdapter(*vc)
 		if err != nil {
-			log.Printf("redis integration disabled: %v", err)
+			log.Printf("valkey integration disabled: %v", err)
 		} else {
 			store = adapter
 		}
@@ -226,11 +234,11 @@ type Lobby struct {
 	queue        []*Client
 	sessions     map[string]*Session
 	queueTimeout time.Duration
-	store        redisStore
+	store        valkeyStore
 }
 
 // NewLobby creates a lobby ready to accept players.
-func NewLobby(queueTimeout time.Duration, store redisStore) *Lobby {
+func NewLobby(queueTimeout time.Duration, store valkeyStore) *Lobby {
 	return &Lobby{
 		queue:        make([]*Client, 0, 64),
 		sessions:     make(map[string]*Session),
@@ -457,7 +465,7 @@ func (l *Lobby) enqueue(c *Client) (position int, session *Session) {
 
 	if l.store != nil {
 		if err := l.store.queueRemove(c.id); err != nil {
-			log.Printf("redis queueRemove failed for %s: %v", c.id, err)
+			log.Printf("valkey queueRemove failed for %s: %v", c.id, err)
 		}
 	}
 
@@ -481,13 +489,13 @@ func (l *Lobby) enqueue(c *Client) (position int, session *Session) {
 			l.sessions[session.ID] = session
 			if l.store != nil {
 				if err := l.store.queueRemove(opponent.id); err != nil {
-					log.Printf("redis queueRemove failed for %s: %v", opponent.id, err)
+					log.Printf("valkey queueRemove failed for %s: %v", opponent.id, err)
 				}
 				if err := l.store.queueRemove(c.id); err != nil {
-					log.Printf("redis queueRemove failed for %s: %v", c.id, err)
+					log.Printf("valkey queueRemove failed for %s: %v", c.id, err)
 				}
 				if err := l.store.sessionSave(sessionRecordFromSession(session)); err != nil {
-					log.Printf("redis sessionSave failed for %s: %v", session.ID, err)
+					log.Printf("valkey sessionSave failed for %s: %v", session.ID, err)
 				}
 			}
 			return 0, session
@@ -498,7 +506,7 @@ func (l *Lobby) enqueue(c *Client) (position int, session *Session) {
 	l.queue = append(l.queue, c)
 	if l.store != nil {
 		if err := l.store.queueAdd(queueEntryFromClient(c)); err != nil {
-			log.Printf("redis queueAdd failed for %s: %v", c.id, err)
+			log.Printf("valkey queueAdd failed for %s: %v", c.id, err)
 		}
 	}
 	return len(l.queue), nil
@@ -573,7 +581,7 @@ func (l *Lobby) handleAnswer(payload submitAnswerPayload) error {
 		l.finishMatchLocked(session, "final_round")
 	} else if l.store != nil {
 		if err := l.store.sessionSave(sessionRecordFromSession(session)); err != nil {
-			log.Printf("redis sessionSave failed for %s: %v", session.ID, err)
+			log.Printf("valkey sessionSave failed for %s: %v", session.ID, err)
 		}
 	}
 
@@ -594,7 +602,7 @@ func (l *Lobby) handleDisconnect(c *Client, reason string) {
 
 	if l.store != nil {
 		if err := l.store.queueRemove(c.id); err != nil {
-			log.Printf("redis queueRemove failed for %s: %v", c.id, err)
+			log.Printf("valkey queueRemove failed for %s: %v", c.id, err)
 		}
 	}
 
@@ -616,7 +624,7 @@ func (l *Lobby) handleDisconnect(c *Client, reason string) {
 
 	if l.store != nil {
 		if err := l.store.sessionDelete(session.ID); err != nil {
-			log.Printf("redis sessionDelete failed for %s: %v", session.ID, err)
+			log.Printf("valkey sessionDelete failed for %s: %v", session.ID, err)
 		}
 	}
 
@@ -646,7 +654,7 @@ func (l *Lobby) finishMatchLocked(session *Session, reason string) {
 
 	if l.store != nil {
 		if err := l.store.sessionDelete(session.ID); err != nil {
-			log.Printf("redis sessionDelete failed for %s: %v", session.ID, err)
+			log.Printf("valkey sessionDelete failed for %s: %v", session.ID, err)
 		}
 	}
 
@@ -691,15 +699,14 @@ func (s *Session) otherPlayer(id string) *Client {
 	return nil
 }
 
-type redisQueueEntry struct {
+type valkeyQueueEntry struct {
 	PlayerID    string    `json:"player_id"`
 	DisplayName string    `json:"display_name"`
 	BetAmount   *float64  `json:"bet_amount,omitempty"`
 	BetToken    string    `json:"bet_token,omitempty"`
 	JoinedAt    time.Time `json:"joined_at"`
 }
-
-type redisSessionRecord struct {
+type valkeySessionRecord struct {
 	MatchID   string         `json:"match_id"`
 	PlayerIDs []string       `json:"player_ids"`
 	Scores    map[string]int `json:"scores"`
@@ -708,8 +715,8 @@ type redisSessionRecord struct {
 	UpdatedAt time.Time      `json:"updated_at"`
 }
 
-func queueEntryFromClient(c *Client) redisQueueEntry {
-	return redisQueueEntry{
+func queueEntryFromClient(c *Client) valkeyQueueEntry {
+	return valkeyQueueEntry{
 		PlayerID:    c.id,
 		DisplayName: c.name,
 		BetAmount:   cloneFloatPointer(c.betAmount),
@@ -718,12 +725,12 @@ func queueEntryFromClient(c *Client) redisQueueEntry {
 	}
 }
 
-func sessionRecordFromSession(s *Session) redisSessionRecord {
+func sessionRecordFromSession(s *Session) valkeySessionRecord {
 	playerIDs := make([]string, 0, len(s.players))
 	for id := range s.players {
 		playerIDs = append(playerIDs, id)
 	}
-	return redisSessionRecord{
+	return valkeySessionRecord{
 		MatchID:   s.ID,
 		PlayerIDs: playerIDs,
 		Scores:    copyScores(s.scores),
@@ -792,43 +799,55 @@ func copyScores(scores map[string]int) map[string]int {
 	return clone
 }
 
-type redisAdapter struct {
-	client        *redis.Client
+type valkeyAdapter struct {
+	client        valkey.Client
 	queueKey      string
 	sessionPrefix string
 	timeout       time.Duration
 }
 
-func newRedisAdapter(cfg RedisConfig) (*redisAdapter, error) {
+func newValkeyAdapter(cfg ValkeyConfig) (*valkeyAdapter, error) {
 	timeout := cfg.OperationTimeout
 	if timeout <= 0 {
-		timeout = defaultRedisOpTimeout
+		timeout = defaultValkeyOpTimeout
 	}
 
 	queueKey := cfg.QueueKey
 	if queueKey == "" {
-		queueKey = defaultRedisQueueKey
+		queueKey = defaultValkeyQueueKey
 	}
 
 	sessionPrefix := cfg.SessionKeyPrefix
 	if sessionPrefix == "" {
-		sessionPrefix = defaultRedisSessionKey
+		sessionPrefix = defaultValkeySessionKey
 	}
 
-	client := redis.NewClient(&redis.Options{
-		Addr:     cfg.Addr,
-		Username: cfg.Username,
-		Password: cfg.Password,
-		DB:       cfg.DB,
-	})
+	clientOpt := valkey.ClientOption{
+		InitAddress: []string{cfg.Addr},
+	}
+	if cfg.Username != "" {
+		clientOpt.Username = cfg.Username
+	}
+	if cfg.Password != "" {
+		clientOpt.Password = cfg.Password
+	}
+	if cfg.DB != 0 {
+		clientOpt.SelectDB = cfg.DB
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	if err := client.Ping(ctx).Err(); err != nil {
+	client, err := valkey.NewClient(clientOpt)
+	if err != nil {
 		return nil, err
 	}
 
-	return &redisAdapter{
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := client.Do(ctx, client.B().Ping().Build()).Error(); err != nil {
+		client.Close()
+		return nil, err
+	}
+
+	return &valkeyAdapter{
 		client:        client,
 		queueKey:      queueKey,
 		sessionPrefix: sessionPrefix,
@@ -836,7 +855,7 @@ func newRedisAdapter(cfg RedisConfig) (*redisAdapter, error) {
 	}, nil
 }
 
-func (r *redisAdapter) queueAdd(entry redisQueueEntry) error {
+func (r *valkeyAdapter) queueAdd(entry valkeyQueueEntry) error {
 	if entry.PlayerID == "" {
 		return nil
 	}
@@ -846,19 +865,19 @@ func (r *redisAdapter) queueAdd(entry redisQueueEntry) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 	defer cancel()
-	return r.client.HSet(ctx, r.queueKey, entry.PlayerID, payload).Err()
+	return r.client.Do(ctx, r.client.B().Hset().Key(r.queueKey).FieldValue().FieldValue(entry.PlayerID, string(payload)).Build()).Error()
 }
 
-func (r *redisAdapter) queueRemove(playerID string) error {
+func (r *valkeyAdapter) queueRemove(playerID string) error {
 	if playerID == "" {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 	defer cancel()
-	return r.client.HDel(ctx, r.queueKey, playerID).Err()
+	return r.client.Do(ctx, r.client.B().Hdel().Key(r.queueKey).Field(playerID).Build()).Error()
 }
 
-func (r *redisAdapter) sessionSave(record redisSessionRecord) error {
+func (r *valkeyAdapter) sessionSave(record valkeySessionRecord) error {
 	if record.MatchID == "" {
 		return nil
 	}
@@ -868,18 +887,22 @@ func (r *redisAdapter) sessionSave(record redisSessionRecord) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 	defer cancel()
-	return r.client.Set(ctx, r.sessionKey(record.MatchID), payload, 0).Err()
+	return r.client.Do(ctx, r.client.B().Set().Key(r.sessionKey(record.MatchID)).Value(string(payload)).Build()).Error()
 }
 
-func (r *redisAdapter) sessionDelete(matchID string) error {
+func (r *valkeyAdapter) sessionDelete(matchID string) error {
 	if matchID == "" {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 	defer cancel()
-	return r.client.Del(ctx, r.sessionKey(matchID)).Err()
+	return r.client.Do(ctx, r.client.B().Del().Key(r.sessionKey(matchID)).Build()).Error()
 }
 
-func (r *redisAdapter) sessionKey(matchID string) string {
+func (r *valkeyAdapter) sessionKey(matchID string) string {
 	return fmt.Sprintf("%s:%s", r.sessionPrefix, matchID)
+}
+
+func (r *valkeyAdapter) Close() {
+	r.client.Close()
 }

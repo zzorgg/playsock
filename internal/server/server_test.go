@@ -136,35 +136,35 @@ func TestHandleDisconnectAwardsWin(t *testing.T) {
 	}
 }
 
-type fakeRedisStore struct {
-	queueAdds      []redisQueueEntry
+type fakeValkeyStore struct {
+	queueAdds      []valkeyQueueEntry
 	queueRemoves   []string
-	sessionSaves   []redisSessionRecord
+	sessionSaves   []valkeySessionRecord
 	sessionDeletes []string
 }
 
-func (f *fakeRedisStore) queueAdd(entry redisQueueEntry) error {
+func (f *fakeValkeyStore) queueAdd(entry valkeyQueueEntry) error {
 	f.queueAdds = append(f.queueAdds, entry)
 	return nil
 }
 
-func (f *fakeRedisStore) queueRemove(playerID string) error {
+func (f *fakeValkeyStore) queueRemove(playerID string) error {
 	f.queueRemoves = append(f.queueRemoves, playerID)
 	return nil
 }
 
-func (f *fakeRedisStore) sessionSave(record redisSessionRecord) error {
+func (f *fakeValkeyStore) sessionSave(record valkeySessionRecord) error {
 	f.sessionSaves = append(f.sessionSaves, record)
 	return nil
 }
 
-func (f *fakeRedisStore) sessionDelete(matchID string) error {
+func (f *fakeValkeyStore) sessionDelete(matchID string) error {
 	f.sessionDeletes = append(f.sessionDeletes, matchID)
 	return nil
 }
 
-func TestLobbyPersistsToRedisStore(t *testing.T) {
-	store := &fakeRedisStore{}
+func TestLobbyPersistsToValkeyStore(t *testing.T) {
+	store := &fakeValkeyStore{}
 	lobby := NewLobby(0, store)
 
 	c1 := &Client{id: "alice", name: "Alice", send: make(chan []byte, 4)}

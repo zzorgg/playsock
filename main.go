@@ -41,51 +41,58 @@ func main() {
 		}
 	}
 
-	var redisCfg *server.RedisConfig
-	if addr := os.Getenv("PLAYSOCK_REDIS_ADDR"); addr != "" {
-		rc := &server.RedisConfig{Addr: addr}
-		if user := os.Getenv("PLAYSOCK_REDIS_USERNAME"); user != "" {
-			rc.Username = user
+	// Valkey configuration (new) with backward compatibility for legacy PLAYSOCK_REDIS_* vars.
+	// New preferred variables: PLAYSOCK_VALKEY_*
+	// Fallback to PLAYSOCK_REDIS_* if VALKEY versions are absent.
+	get := func(primary, legacy string) string {
+		if v := os.Getenv(primary); v != "" {
+			return v
 		}
-		if pass := os.Getenv("PLAYSOCK_REDIS_PASSWORD"); pass != "" {
-			rc.Password = pass
+		return os.Getenv(legacy)
+	}
+
+	var valkeyCfg *server.ValkeyConfig
+	if addr := get("PLAYSOCK_VALKEY_ADDR", "PLAYSOCK_REDIS_ADDR"); addr != "" {
+		vc := &server.ValkeyConfig{Addr: addr}
+		if user := get("PLAYSOCK_VALKEY_USERNAME", "PLAYSOCK_REDIS_USERNAME"); user != "" {
+			vc.Username = user
 		}
-		if dbRaw := os.Getenv("PLAYSOCK_REDIS_DB"); dbRaw != "" {
+		if pass := get("PLAYSOCK_VALKEY_PASSWORD", "PLAYSOCK_REDIS_PASSWORD"); pass != "" {
+			vc.Password = pass
+		}
+		if dbRaw := get("PLAYSOCK_VALKEY_DB", "PLAYSOCK_REDIS_DB"); dbRaw != "" {
 			if db, err := strconv.Atoi(dbRaw); err == nil {
-				rc.DB = db
+				vc.DB = db
 			} else {
-				log.Printf("invalid PLAYSOCK_REDIS_DB value %q: %v", dbRaw, err)
+				log.Printf("invalid VALKEY/REDIS DB value %q: %v", dbRaw, err)
 			}
 		}
-		if key := os.Getenv("PLAYSOCK_REDIS_QUEUE_KEY"); key != "" {
-			rc.QueueKey = key
+		if key := get("PLAYSOCK_VALKEY_QUEUE_KEY", "PLAYSOCK_REDIS_QUEUE_KEY"); key != "" {
+			vc.QueueKey = key
 		}
-		if prefix := os.Getenv("PLAYSOCK_REDIS_SESSION_PREFIX"); prefix != "" {
-			rc.SessionKeyPrefix = prefix
+		if prefix := get("PLAYSOCK_VALKEY_SESSION_PREFIX", "PLAYSOCK_REDIS_SESSION_PREFIX"); prefix != "" {
+			vc.SessionKeyPrefix = prefix
 		}
-		if timeoutRaw := os.Getenv("PLAYSOCK_REDIS_TIMEOUT"); timeoutRaw != "" {
+		if timeoutRaw := get("PLAYSOCK_VALKEY_TIMEOUT", "PLAYSOCK_REDIS_TIMEOUT"); timeoutRaw != "" {
 			if dur, err := time.ParseDuration(timeoutRaw); err == nil {
-				rc.OperationTimeout = dur
+				vc.OperationTimeout = dur
 			} else {
-				log.Printf("invalid PLAYSOCK_REDIS_TIMEOUT value %q: %v", timeoutRaw, err)
+				log.Printf("invalid VALKEY/REDIS TIMEOUT value %q: %v", timeoutRaw, err)
 			}
 		}
-		redisCfg = rc
+		valkeyCfg = vc
 	}
 
 	cfg := server.Config{
 		AllowedOrigins: origins,
 		QueueTimeout:   queueTimeout,
-		Redis:          redisCfg,
+		Valkey:         valkeyCfg,
+		Redis:          nil, // deprecated field intentionally left nil
 	}
 
 	wsServer := server.New(cfg)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", wsServer.HandleWS)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
 
 	srv := &http.Server{
 		Addr:              addr,

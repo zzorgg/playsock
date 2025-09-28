@@ -43,7 +43,7 @@ There are two main ways to deploy your WebSocket server to DigitalOcean:
 
    | Key | Example | Notes |
    |-----|---------|-------|
-   | `PLAYSOCK_ALLOWED_ORIGINS` | `https://playsock.yourdomain.com` | Lock this down to your production frontend origin. |
+   | `PLAYSOCK_ALLOWED_ORIGINS` | `playsock-mobile://app` | List the exact origins your mobile clients emit (custom schemes or `https://` domains). Use `*` only if mobile libraries omit the header entirely. |
    | `PLAYSOCK_QUEUE_TIMEOUT` | `5m` | Increase if you anticipate longer matchmaking windows. |
    | `PLAYSOCK_REDIS_ADDR` | `${redis.HOSTNAME}:${redis.PORT}` | Provided automatically when you attach a managed Redis instance. |
    | `PLAYSOCK_REDIS_PASSWORD` | `${redis.PASSWORD}` | Required when using managed Redis. |
@@ -83,134 +83,69 @@ wss://your-app-name-xxxxx.ondigitalocean.app/ws
    # Update system
    apt update && apt upgrade -y
    
-   # Install Docker
-   curl -fsSL https://get.docker.com -o get-docker.sh
-   sh get-docker.sh
-   
-   # Install Docker Compose
-   apt install docker-compose -y
-   
-   # Start Docker
-   systemctl start docker
-   systemctl enable docker
-   ```
+   ## Deploying to DigitalOcean App Platform
 
-4. **Deploy your application**:
+   This project is optimized for DigitalOcean App Platform using its Docker build.
+
+   ### 1. Push Repository
+   If not yet pushed:
    ```bash
-   # Clone your repository
-   git clone https://github.com/yourusername/playsock.git
-   cd playsock
-   
-   # Build and run with Docker Compose (uses the production Dockerfile)
-   docker compose up --build -d
+   git init
+   git add .
+   git commit -m "Deploy"
+   git branch -M main
+   git remote add origin https://github.com/yourusername/playsock.git
+   git push -u origin main
    ```
 
-5. **Configure Firewall**:
-   ```bash
-   # Install UFW if not installed
-   apt install ufw -y
-   
-   # Allow SSH, HTTP, and your app port
-   ufw allow ssh
-   ufw allow 80
-   ufw allow 443
-   ufw allow 8080
-   ufw --force enable
+   ### 2. Create App
+   1. Visit App Platform
+   2. Create App → choose the GitHub repo
+   3. Select root directory `/`
+   4. Component type: Web Service
+   5. Port: 8080 (the container exposes it)
+
+   ### 3. Optional Valkey (Managed Database)
+   Add a Managed Database → Valkey. This enables multi-instance coordination for queue & session metadata.
+
+   ### 4. Environment Variables
+
+   | Key | Example | Notes |
+   |-----|---------|-------|
+   | `PLAYSOCK_ALLOWED_ORIGINS` | `playsock-mobile://app` | Restrict to your mobile / web origins. Use `*` only if clients do not send Origin. |
+   | `PLAYSOCK_QUEUE_TIMEOUT` | `5m` | Max time a player can sit in the queue. |
+   | `PLAYSOCK_VALKEY_ADDR` | `${valkey.HOSTNAME}:${valkey.PORT}` | Auto-provided when attaching a Valkey managed database. Leave unset to disable. |
+   | `PLAYSOCK_VALKEY_PASSWORD` | `${valkey.PASSWORD}` | Required for managed Valkey if auth enabled. |
+   | `PLAYSOCK_VALKEY_TIMEOUT` | `2s` | Operation timeout (duration string). |
+   | `PLAYSOCK_SHUTDOWN_TIMEOUT` | `15s` | Graceful shutdown drain window. |
+
+   Legacy `PLAYSOCK_REDIS_*` variables are still accepted but will be removed later—migrate to `PLAYSOCK_VALKEY_*`.
+
+   ### 5. Deploy
+   Click Deploy. First build typically finishes in a few minutes.
+
+   ### 6. Connect From Client
+   Your WebSocket endpoint:
+   ```
+   wss://<app-name>-<hash>.ondigitalocean.app/ws
    ```
 
-6. **Setup Domain (Optional)**:
-   - Point your domain to the droplet IP
-   - Install nginx for reverse proxy:
-   ```bash
-   apt install nginx -y
-   ```
-   
-   Create nginx config:
-   ```bash
-   cat > /etc/nginx/sites-available/playsock << 'EOF'
-   server {
-       listen 80;
-       server_name your-domain.com;
-       
-       location /ws {
-           proxy_pass http://localhost:8080;
-           proxy_http_version 1.1;
-           proxy_set_header Upgrade $http_upgrade;
-           proxy_set_header Connection "upgrade";
-           proxy_set_header Host $host;
-           proxy_set_header X-Real-IP $remote_addr;
-           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-           proxy_set_header X-Forwarded-Proto $scheme;
-       }
-
-      location /healthz {
-         proxy_pass http://localhost:8080/healthz;
-      }
-   }
-   EOF
-   
-   # Enable site
-   ln -s /etc/nginx/sites-available/playsock /etc/nginx/sites-enabled/
-   nginx -t
-   systemctl reload nginx
+   Send a sample frame:
+   ```json
+   {"action":"join_queue","data":{"player_id":"alice","display_name":"Alice"}}
    ```
 
-### Your WebSocket URL will be:
-```
-ws://your-droplet-ip:8080/ws
-# or with domain:
-ws://your-domain.com/ws
-```
+   ### Logs & Scaling
+   Use the App Platform dashboard → Logs. Scale vertically or add more instances; with Valkey configured state coordination works across replicas.
 
-## Testing Deployment
+   ### Security Notes
+   1. Pin exact origins in `PLAYSOCK_ALLOWED_ORIGINS`.
+   2. Keep Valkey credentials only in App Platform env vars.
+   3. Rebuild periodically for patched base image & Go runtime.
+   4. Set sensible timeouts via `PLAYSOCK_VALKEY_TIMEOUT` & `PLAYSOCK_SHUTDOWN_TIMEOUT`.
 
-Test your deployed server:
+   ### Removing Valkey
+   Leave `PLAYSOCK_VALKEY_ADDR` empty to run purely in-memory (single instance only).
 
-```bash
-# Install wscat if not installed
-npm install -g wscat
-
-# Test connection
-wscat -c wss://your-app-url/ws
-# or
-wscat -c ws://your-droplet-ip:8080/ws
-
-# Join the matchmaking queue
-{"action": "join_queue", "data": {"player_id": "alice", "display_name": "Alice"}}
-```
-
-## Monitoring & Logs
-
-### App Platform:
-- View logs in DigitalOcean dashboard → Apps → Your App → Runtime Logs
-
-### Droplet:
-```bash
-# View container logs
-docker compose logs -f playsock
-
-# View system resources
-htop
-docker stats
-```
-
-## Cost Estimates
-
-- **App Platform**: ~$5-12/month (includes hosting + Redis)
-- **Droplet**: $6/month (Basic) + $15/month (Redis managed database, optional)
-
-## Security Recommendations
-
-1. **Lock down origins** — configure `PLAYSOCK_ALLOWED_ORIGINS` with exact production domains.
-2. **Keep secrets in App Platform** — store Redis credentials and other secrets in DigitalOcean's encrypted env var store.
-3. **Force HTTPS/WSS** in production (App Platform terminates TLS automatically; for droplets use nginx + certbot).
-4. **Patch regularly** — rebuild the Docker image to pull patched base layers and Go runtime.
-5. **Monitor and alert** — pipe logs to DigitalOcean Logs or a third-party (Vector, Papertrail) and set alerts on error spikes.
-6. **Minimum privileges** — the container runs as an unprivileged user by default; avoid mounting host volumes with write access unless required.
-
-## Scaling & Operations
-
-- **App Platform**: Enable autoscaling and set min/max instance counts. Health check (`/healthz`) keeps bad instances out of rotation.
-- **Droplet**: Add a DigitalOcean Load Balancer in front of multiple droplets. Point each droplet at the same Redis instance so matchmaking state is shared.
-- **Redis**: Use managed Redis for persistence and monitoring. If self-hosting, enable persistence (`--appendonly yes`) and backups.
-- **Backups**: Snapshot droplets before major updates and export App Platform configs using `doctl apps spec get`.
+   ---
+   Future enhancements: add metrics, structured logging, and optional rate limit tuning.
