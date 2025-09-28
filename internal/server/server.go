@@ -189,6 +189,12 @@ func New(cfg Config) *Server {
 			if len(cfg.AllowedOrigins) == 0 {
 				return true
 			}
+			// Check for wildcard
+			for _, allowed := range cfg.AllowedOrigins {
+				if allowed == "*" {
+					return true
+				}
+			}
 			origin := r.Header.Get("Origin")
 			for _, allowed := range cfg.AllowedOrigins {
 				if origin == allowed {
