@@ -1,13 +1,13 @@
 # Playsock Matchmaking Server
 
-A realtime WebSocket server written in Go that pairs mobile players into head-to-head trivia matches, relays game state updates, and enforces basic multiplayer rules. SOL wagers are handled entirely on-chain by the clients; the server simply mirrors bet metadata so both players can settle through Anchor afterwards.
+A realtime WebSocket server written in Go that pairs mobile players into head-to-head trivia matches, relays game state updates, and enforces basic multiplayer rules.
 
 ## Features
 
 - Accepts WebSocket connections from Kotlin (or any) clients at `GET /ws`.
-- Maintains a matchmaking queue and automatically pairs the next two compatible players (optionally filtered by bet token/amount).
+- Maintains a matchmaking queue and automatically pairs the next two waiting players.
 - Optionally mirrors queue and session metadata into Valkey so multiple server instances share visibility and analytics.
-- Creates lightweight game sessions that track both players, their scores, round information, and bet metadata.
+- Creates lightweight game sessions that track both players, their scores, and round information.
 - Relays score updates and opponent answers in realtime.
 - Detects disconnects and awards a walkover victory to the remaining player.
 - Sends end-of-match summaries for clients to validate before finalising Anchor transactions.
@@ -64,7 +64,7 @@ All frames are UTF-8 JSON encoded envelopes:
 
 | Action | Payload | Purpose |
 |--------|---------|---------|
-| `join_queue` | `{ "player_id": "p1", "display_name": "Alice", "bet_amount": 1.5, "bet_token": "SOL" }` | Registers/updates the player and enters them into the matchmaking queue. |
+| `join_queue` | `{ "player_id": "p1", "display_name": "Alice" }` | Registers/updates the player and enters them into the matchmaking queue. |
 | `submit_answer` | `{ "match_id": "...", "player_id": "p1", "question_id": "q1", "answer": "42", "correct": true, "score_delta": 1, "final": false, "round_number": 1 }` | Reports a round result. The server updates internal scores and forwards the outcome. |
 
 ### Server → Client actions
@@ -72,11 +72,11 @@ All frames are UTF-8 JSON encoded envelopes:
 | Action | Payload | Description |
 |--------|---------|-------------|
 | `queued` | `{ "position": 1 }` | Confirmation that the player joined the queue. |
-| `match_found` | `{ "match_id": "...", "player_id": "p1", "opponent_id": "p2", "opponent_name": "Bob", "bet_amount": 1.5, "bet_token": "SOL", "queue_delta_ms": 12 }` | Two players were paired; both are notified simultaneously. `queue_delta_ms` shows the millisecond gap between the players' join events. |
+| `match_found` | `{ "match_id": "...", "player_id": "p1", "opponent_id": "p2", "opponent_name": "Bob", "queue_delta_ms": 12 }` | Two players were paired; both are notified simultaneously. `queue_delta_ms` shows the millisecond gap between the players' join events. |
 | `score_update` | `{ "match_id": "...", "scores": {"p1": 1, "p2": 0}, "updated_player_id": "p1", "correct": true, "question_id": "q1", "round_number": 1 }` | Current scoreboard after an answer. |
 | `opponent_answer` | `{ "match_id": "...", "player_id": "p1", "question_id": "q1", "answer": "42", "round_number": 1, "correct": true }` | Optional mirror of the opponent's submission for richer UX. |
 | `opponent_left` | `{ "match_id": "...", "opponent_id": "p2" }` | Sent if the opponent disconnects mid-match. |
-| `game_over` | `{ "match_id": "...", "winner_id": "p1", "reason": "final_round", "scores": {"p1": 5, "p2": 3}, "bet_amount": 1.5, "bet_token": "SOL" }` | Match finished—use this info to settle on-chain. |
+| `game_over` | `{ "match_id": "...", "winner_id": "p1", "reason": "final_round", "scores": {"p1": 5, "p2": 3} }` | Match finished—use this info to settle on-chain. |
 | `error` | `{ "message": "..." }` | Validation feedback (e.g., malformed payloads). |
 
 ## Development workflow
@@ -93,7 +93,7 @@ The lobby keeps an ordered, concurrency-safe queue. Each time a player taps “P
 - The precise `time.Now()` timestamp (monotonic on supported platforms).
 - A monotonically increasing sequence number to break ties when two players arrive within the same millisecond.
 
-Players are inserted into the queue in ascending timestamp/sequence order. Whenever a player joins, the lobby scans from the head of the queue to find the earliest compatible opponent (bet amount/token). Once a pair is found:
+Players are inserted into the queue in ascending timestamp/sequence order. Whenever a player joins, the lobby scans from the head of the queue to find the earliest available opponent. Once a pair is found:
 
 1. Both players are atomically popped from the queue.
 2. A new match is created with a UUIDv4 `match_id`, and both clients share that identifier for the rest of the session and any settlement logic.
@@ -120,3 +120,4 @@ docker compose up --build
 ```
 
 The container runs as a non-root user and exposes port `8080`. Health checks hit `/healthz` and can be wired into orchestrators such as DigitalOcean App Platform, Kubernetes, or Docker Swarm.
+

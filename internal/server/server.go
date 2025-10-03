@@ -61,10 +61,8 @@ type Envelope struct {
 
 // joinQueuePayload describes the payload the client sends when requesting matchmaking.
 type joinQueuePayload struct {
-	PlayerID    string   `json:"player_id"`
-	DisplayName string   `json:"display_name"`
-	BetAmount   *float64 `json:"bet_amount,omitempty"`
-	BetToken    string   `json:"bet_token,omitempty"`
+	PlayerID    string `json:"player_id"`
+	DisplayName string `json:"display_name"`
 }
 
 // queuedPayload is sent back to the client after joining the queue.
@@ -74,28 +72,24 @@ type queuedPayload struct {
 
 // matchFoundPayload informs the client that a match has been created.
 type matchFoundPayload struct {
-	MatchID        string   `json:"match_id"`
-	OpponentID     string   `json:"opponent_id"`
-	OpponentName   string   `json:"opponent_name"`
-	BetAmount      *float64 `json:"bet_amount,omitempty"`
-	BetToken       string   `json:"bet_token,omitempty"`
-	YouArePlayerID string   `json:"player_id"`
-	QueueDeltaMs   int64    `json:"queue_delta_ms"`
+	MatchID        string `json:"match_id"`
+	OpponentID     string `json:"opponent_id"`
+	OpponentName   string `json:"opponent_name"`
+	YouArePlayerID string `json:"player_id"`
+	QueueDeltaMs   int64  `json:"queue_delta_ms"`
 }
 
 // submitAnswerPayload is received when a client submits an answer.
 type submitAnswerPayload struct {
-	MatchID     string   `json:"match_id"`
-	PlayerID    string   `json:"player_id"`
-	QuestionID  string   `json:"question_id"`
-	Answer      string   `json:"answer"`
-	Correct     bool     `json:"correct"`
-	ScoreDelta  int      `json:"score_delta"`
-	Final       bool     `json:"final"`
-	RoundNumber int      `json:"round_number"`
-	Notes       string   `json:"notes,omitempty"`
-	BetAmount   *float64 `json:"bet_amount,omitempty"`
-	BetToken    string   `json:"bet_token,omitempty"`
+	MatchID     string `json:"match_id"`
+	PlayerID    string `json:"player_id"`
+	QuestionID  string `json:"question_id"`
+	Answer      string `json:"answer"`
+	Correct     bool   `json:"correct"`
+	ScoreDelta  int    `json:"score_delta"`
+	Final       bool   `json:"final"`
+	RoundNumber int    `json:"round_number"`
+	Notes       string `json:"notes,omitempty"`
 }
 
 // scoreUpdatePayload notifies both players of score changes.
@@ -119,12 +113,10 @@ type opponentAnswerPayload struct {
 
 // gameOverPayload is sent at the end of a match.
 type gameOverPayload struct {
-	MatchID   string         `json:"match_id"`
-	WinnerID  string         `json:"winner_id"`
-	Reason    string         `json:"reason"`
-	Scores    map[string]int `json:"scores"`
-	BetAmount *float64       `json:"bet_amount,omitempty"`
-	BetToken  string         `json:"bet_token,omitempty"`
+	MatchID  string         `json:"match_id"`
+	WinnerID string         `json:"winner_id"`
+	Reason   string         `json:"reason"`
+	Scores   map[string]int `json:"scores"`
 }
 
 // opponentLeftPayload lets the remaining player know their opponent disconnected.
@@ -329,8 +321,6 @@ type Client struct {
 
 	id        string
 	name      string
-	betAmount *float64
-	betToken  string
 	matchID   string
 	joinedAt  time.Time
 	lastMsgAt time.Time
@@ -494,8 +484,6 @@ func (c *Client) handleJoinQueue(raw json.RawMessage) {
 
 	c.id = payload.PlayerID
 	c.name = payload.DisplayName
-	c.betAmount = payload.BetAmount
-	c.betToken = payload.BetToken
 
 	position, session := c.lobby.enqueue(c)
 	c.sendEnvelope(ActionQueued, queuedPayload{Position: position})
@@ -547,29 +535,23 @@ func (c *Client) close(reason string) {
 
 // Session encapsulates an active match between two players.
 type Session struct {
-	ID        string
-	players   map[string]*Client
-	scores    map[string]int
-	betAmount *float64
-	betToken  string
-	created   time.Time
-	queueGap  time.Duration
-	pairedAt  time.Time
+	ID       string
+	players  map[string]*Client
+	scores   map[string]int
+	created  time.Time
+	queueGap time.Duration
+	pairedAt time.Time
 }
 
 func newSession(c1, c2 *Client) *Session {
 	id := uuid.NewString()
-	betAmount := mergeBetAmount(c1.betAmount, c2.betAmount)
-	betToken := mergeBetToken(c1.betToken, c2.betToken)
 
 	session := &Session{
-		ID:        id,
-		players:   map[string]*Client{c1.id: c1, c2.id: c2},
-		scores:    map[string]int{c1.id: 0, c2.id: 0},
-		betAmount: betAmount,
-		betToken:  betToken,
-		created:   time.Now(),
-		pairedAt:  time.Now(),
+		ID:       id,
+		players:  map[string]*Client{c1.id: c1, c2.id: c2},
+		scores:   map[string]int{c1.id: 0, c2.id: 0},
+		created:  time.Now(),
+		pairedAt: time.Now(),
 	}
 	c1.matchID = id
 	c2.matchID = id
@@ -649,8 +631,6 @@ func (l *Lobby) notifyMatchFound(s *Session) {
 			MatchID:        s.ID,
 			OpponentID:     opponentID,
 			OpponentName:   opponentName,
-			BetAmount:      s.betAmount,
-			BetToken:       s.betToken,
 			YouArePlayerID: playerID,
 			QueueDeltaMs:   s.queueGap.Milliseconds(),
 		})
@@ -761,8 +741,6 @@ func (l *Lobby) handleDisconnect(c *Client, reason string) {
 			Scores: map[string]int{
 				opponent.id: session.scores[opponent.id],
 			},
-			BetAmount: session.betAmount,
-			BetToken:  session.betToken,
 		}
 		opponent.sendEnvelope(ActionGameOver, gameOver)
 	}
@@ -795,12 +773,10 @@ func (l *Lobby) finishMatchLocked(session *Session, reason string) {
 	}
 
 	payload := gameOverPayload{
-		MatchID:   session.ID,
-		WinnerID:  winnerID,
-		Reason:    reason,
-		Scores:    copyScores(session.scores),
-		BetAmount: session.betAmount,
-		BetToken:  session.betToken,
+		MatchID:  session.ID,
+		WinnerID: winnerID,
+		Reason:   reason,
+		Scores:   copyScores(session.scores),
 	}
 
 	for _, client := range session.players {
@@ -824,12 +800,10 @@ func (l *Lobby) tryMatchLocked() (*Session, *queueItem, *queueItem) {
 			if first.client.id == second.client.id {
 				continue
 			}
-			if compatibleBets(first.client.betAmount, second.client.betAmount, first.client.betToken, second.client.betToken) {
-				l.queue.removeByID(first.client.id)
-				l.queue.removeByID(second.client.id)
-				session := newSession(first.client, second.client)
-				return session, first, second
-			}
+			l.queue.removeByID(first.client.id)
+			l.queue.removeByID(second.client.id)
+			session := newSession(first.client, second.client)
+			return session, first, second
 		}
 	}
 	return nil, nil, nil
@@ -847,16 +821,12 @@ func (s *Session) otherPlayer(id string) *Client {
 type valkeyQueueEntry struct {
 	PlayerID    string    `json:"player_id"`
 	DisplayName string    `json:"display_name"`
-	BetAmount   *float64  `json:"bet_amount,omitempty"`
-	BetToken    string    `json:"bet_token,omitempty"`
 	JoinedAt    time.Time `json:"joined_at"`
 }
 type valkeySessionRecord struct {
 	MatchID   string         `json:"match_id"`
 	PlayerIDs []string       `json:"player_ids"`
 	Scores    map[string]int `json:"scores"`
-	BetAmount *float64       `json:"bet_amount,omitempty"`
-	BetToken  string         `json:"bet_token,omitempty"`
 	UpdatedAt time.Time      `json:"updated_at"`
 }
 
@@ -864,8 +834,6 @@ func queueEntryFromClient(c *Client) valkeyQueueEntry {
 	return valkeyQueueEntry{
 		PlayerID:    c.id,
 		DisplayName: c.name,
-		BetAmount:   cloneFloatPointer(c.betAmount),
-		BetToken:    c.betToken,
 		JoinedAt:    c.joinedAt,
 	}
 }
@@ -879,61 +847,8 @@ func sessionRecordFromSession(s *Session) valkeySessionRecord {
 		MatchID:   s.ID,
 		PlayerIDs: playerIDs,
 		Scores:    copyScores(s.scores),
-		BetAmount: cloneFloatPointer(s.betAmount),
-		BetToken:  s.betToken,
 		UpdatedAt: time.Now(),
 	}
-}
-
-func cloneFloatPointer(val *float64) *float64 {
-	if val == nil {
-		return nil
-	}
-	copy := *val
-	return &copy
-}
-
-func compatibleBets(a, b *float64, tokenA, tokenB string) bool {
-	if tokenA != "" && tokenB != "" && tokenA != tokenB {
-		return false
-	}
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return true
-	}
-	return absFloat(*a-*b) < 1e-9
-}
-
-func mergeBetAmount(a, b *float64) *float64 {
-	if a != nil && b != nil {
-		avg := (*a + *b) / 2
-		return &avg
-	}
-	if a != nil {
-		val := *a
-		return &val
-	}
-	if b != nil {
-		val := *b
-		return &val
-	}
-	return nil
-}
-
-func mergeBetToken(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
-}
-
-func absFloat(val float64) float64 {
-	if val < 0 {
-		return -val
-	}
-	return val
 }
 
 func copyScores(scores map[string]int) map[string]int {
