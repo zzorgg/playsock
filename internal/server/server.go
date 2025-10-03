@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -142,6 +144,12 @@ type Config struct {
 	AllowedOrigins []string
 	// QueueTimeout optionally bounds how long a player can idle in the queue.
 	QueueTimeout time.Duration
+	// HandshakeTimeout controls how long an upgrade handshake may take before being aborted.
+	HandshakeTimeout time.Duration
+	// MaxConnectionsPerIP limits concurrent connections per remote IP when > 0.
+	MaxConnectionsPerIP int
+	// AuthTokens enumerates bearer tokens permitted to connect; empty slice disables token checks.
+	AuthTokens []string
 	// Valkey holds connection information for coordinating state across instances.
 	Valkey *ValkeyConfig
 	// Redis is deprecated; kept for backward compatibility with older env vars.
@@ -169,9 +177,11 @@ type valkeyStore interface {
 
 // Server hosts the matchmaking and game coordination logic over WebSockets.
 type Server struct {
-	cfg      Config
-	lobby    *Lobby
-	upgrader websocket.Upgrader
+	cfg               Config
+	lobby             *Lobby
+	upgrader          websocket.Upgrader
+	authTokens        map[string]struct{}
+	connectionLimiter *connectionLimiter
 }
 
 // New constructs a Server with sensible defaults.
@@ -214,19 +224,76 @@ func New(cfg Config) *Server {
 			return false
 		},
 	}
+	handshakeTimeout := cfg.HandshakeTimeout
+	if handshakeTimeout <= 0 {
+		handshakeTimeout = 5 * time.Second
+	}
+	upgrader.HandshakeTimeout = handshakeTimeout
 
-	return &Server{cfg: cfg, lobby: lobby, upgrader: upgrader}
+	limiter := newConnectionLimiter(cfg.MaxConnectionsPerIP)
+	tokenSet := make(map[string]struct{}, len(cfg.AuthTokens))
+	for _, token := range cfg.AuthTokens {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		tokenSet[token] = struct{}{}
+	}
+	if len(tokenSet) == 0 {
+		tokenSet = nil
+	}
+
+	return &Server{
+		cfg:               cfg,
+		lobby:             lobby,
+		upgrader:          upgrader,
+		authTokens:        tokenSet,
+		connectionLimiter: limiter,
+	}
 }
 
 // HandleWS upgrades an HTTP request to a WebSocket and starts handling the player lifecycle.
 func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
+	peerIP := remoteAddr(r)
+	if len(s.authTokens) > 0 {
+		token := extractBearer(r.Header.Get("Authorization"))
+		if token == "" {
+			log.Printf("unauthorized websocket attempt from %s: missing bearer token", peerIP)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if _, ok := s.authTokens[token]; !ok {
+			log.Printf("unauthorized websocket attempt from %s: invalid token", peerIP)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	var release func()
+	if s.connectionLimiter != nil {
+		rel, ok := s.connectionLimiter.acquire(peerIP)
+		if !ok {
+			log.Printf("rejecting websocket from %s: connection limit reached", peerIP)
+			http.Error(w, "too many connections", http.StatusTooManyRequests)
+			return
+		}
+		release = rel
+		defer func() {
+			if release != nil {
+				release()
+			}
+		}()
+	}
+
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("websocket upgrade failed: %v", err)
 		return
 	}
 
-	client := newClient(conn, s.lobby)
+	client := newClient(conn, s.lobby, peerIP, release)
+	release = nil
+	log.Printf("websocket connection established from %s", peerIP)
 	client.start()
 }
 
@@ -252,11 +319,13 @@ func NewLobby(queueTimeout time.Duration, store valkeyStore) *Lobby {
 
 // Client represents a connected player.
 type Client struct {
-	lobby     *Lobby
-	conn      *websocket.Conn
-	send      chan []byte
-	closeOnce sync.Once
-	closed    chan struct{}
+	lobby       *Lobby
+	conn        *websocket.Conn
+	send        chan []byte
+	closeOnce   sync.Once
+	closed      chan struct{}
+	peerIP      string
+	releaseConn func()
 
 	id        string
 	name      string
@@ -267,13 +336,15 @@ type Client struct {
 	lastMsgAt time.Time
 }
 
-func newClient(conn *websocket.Conn, lobby *Lobby) *Client {
+func newClient(conn *websocket.Conn, lobby *Lobby, peerIP string, release func()) *Client {
 	return &Client{
-		lobby:    lobby,
-		conn:     conn,
-		send:     make(chan []byte, 8),
-		closed:   make(chan struct{}),
-		joinedAt: time.Now(),
+		lobby:       lobby,
+		conn:        conn,
+		send:        make(chan []byte, 8),
+		closed:      make(chan struct{}),
+		peerIP:      peerIP,
+		releaseConn: release,
+		joinedAt:    time.Now(),
 	}
 }
 
@@ -384,6 +455,28 @@ func (c *Client) sendError(message string) {
 	c.sendEnvelope(ActionError, errorPayload{Message: message})
 }
 
+func extractBearer(header string) string {
+	if header == "" {
+		return ""
+	}
+	parts := strings.SplitN(header, " ", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	if !strings.EqualFold(parts[0], "Bearer") {
+		return ""
+	}
+	return strings.TrimSpace(parts[1])
+}
+
+func remoteAddr(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
 func (c *Client) handleJoinQueue(raw json.RawMessage) {
 	var payload joinQueuePayload
 	if err := json.Unmarshal(raw, &payload); err != nil {
@@ -392,6 +485,10 @@ func (c *Client) handleJoinQueue(raw json.RawMessage) {
 	}
 	if payload.PlayerID == "" {
 		c.sendError("player_id is required")
+		return
+	}
+	if c.id != "" && c.id != payload.PlayerID {
+		c.sendError("player already registered")
 		return
 	}
 
@@ -418,6 +515,14 @@ func (c *Client) handleSubmitAnswer(raw json.RawMessage) {
 		c.sendError("match_id and player_id are required")
 		return
 	}
+	if payload.PlayerID != c.id {
+		c.sendError("player mismatch")
+		return
+	}
+	if payload.MatchID != c.matchID {
+		c.sendError("invalid match context")
+		return
+	}
 
 	if err := c.lobby.handleAnswer(payload); err != nil {
 		c.sendError(err.Error())
@@ -426,10 +531,17 @@ func (c *Client) handleSubmitAnswer(raw json.RawMessage) {
 
 func (c *Client) close(reason string) {
 	c.closeOnce.Do(func() {
+		if reason != "" {
+			log.Printf("closing websocket for %s (%s): %s", c.id, c.peerIP, reason)
+		}
 		close(c.closed)
 		c.lobby.handleDisconnect(c, reason)
 		close(c.send)
 		_ = c.conn.Close()
+		if c.releaseConn != nil {
+			c.releaseConn()
+			c.releaseConn = nil
+		}
 	})
 }
 

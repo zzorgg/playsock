@@ -140,6 +140,41 @@ func TestHandleDisconnectAwardsWin(t *testing.T) {
 	}
 }
 
+func TestHandleSubmitAnswerRejectsMismatchedClient(t *testing.T) {
+	lobby := NewLobby(0, nil)
+	c := &Client{
+		lobby:   lobby,
+		send:    make(chan []byte, 1),
+		closed:  make(chan struct{}),
+		id:      "alice",
+		matchID: "match-1",
+	}
+
+	payload := submitAnswerPayload{
+		MatchID:  "match-1",
+		PlayerID: "mallory",
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	c.handleSubmitAnswer(raw)
+
+	select {
+	case msg := <-c.send:
+		var env Envelope
+		if err := json.Unmarshal(msg, &env); err != nil {
+			t.Fatalf("invalid json: %v", err)
+		}
+		if env.Action != ActionError {
+			t.Fatalf("expected error action, got %s", env.Action)
+		}
+	default:
+		t.Fatalf("expected error message for mismatched player")
+	}
+}
+
 type fakeValkeyStore struct {
 	queueAdds      []valkeyQueueEntry
 	queueRemoves   []string

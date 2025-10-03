@@ -11,7 +11,15 @@ A realtime WebSocket server written in Go that pairs mobile players into head-to
 - Relays score updates and opponent answers in realtime.
 - Detects disconnects and awards a walkover victory to the remaining player.
 - Sends end-of-match summaries for clients to validate before finalising Anchor transactions.
-  
+- Enforces optional bearer-token authentication and per-IP connection limits to deter abuse in production deployments.
+
+## Security hardening
+
+- **Bearer auth**: populate `PLAYSOCK_AUTH_TOKENS` with one or more secrets. Clients must include `Authorization: Bearer <token>` during the handshake or the upgrade is rejected with HTTP 401.
+- **Connection limiting**: set `PLAYSOCK_MAX_CONNECTIONS_PER_IP` to curb connection floods. When the threshold is reached the server returns HTTP 429 before the upgrade completes.
+- **Handshake timeout**: `PLAYSOCK_HANDSHAKE_TIMEOUT` bounds how long the TLS/WS upgrade may take, preventing slowloris-style attempts.
+- **Payload validation**: clients cannot mutate their `player_id` after joining, and submissions must reference the active match bound to the socket.
+- **Rate limiting**: per-connection message pacing remains enforced server-side (10Hz by default).
 
 ## Quick start
 
@@ -34,6 +42,9 @@ Environment variables:
 | `PLAYSOCK_VALKEY_SESSION_PREFIX` | `playsock:session` | Key prefix for active session snapshots. |
 | `PLAYSOCK_VALKEY_TIMEOUT` | `2s` | Operation timeout (parseable by `time.ParseDuration`). |
 | `PLAYSOCK_QUEUE_TIMEOUT` | `5m` | Max time a player can remain queued before being timed out. |
+| `PLAYSOCK_HANDSHAKE_TIMEOUT` | `5s` | Maximum duration the WebSocket upgrade handshake may take before being aborted. |
+| `PLAYSOCK_MAX_CONNECTIONS_PER_IP` | `32` | Concurrent connection cap applied per remote IP. Set to `0` to disable connection limiting. |
+| `PLAYSOCK_AUTH_TOKENS` | *(disabled)* | Comma-separated list of bearer tokens clients must send via `Authorization: Bearer <token>`. Leave empty to accept any client. |
 | `PLAYSOCK_SHUTDOWN_TIMEOUT` | `10s` | Grace period for draining active connections during shutdown. |
 
 When Valkey is configured the server writes each queue join/remove into `PLAYSOCK_VALKEY_QUEUE_KEY` and snapshots active sessions under `PLAYSOCK_VALKEY_SESSION_PREFIX:<match_id>`.
