@@ -61,7 +61,7 @@ All frames are UTF-8 JSON encoded envelopes:
 | Action | Payload | Description |
 |--------|---------|-------------|
 | `queued` | `{ "position": 1 }` | Confirmation that the player joined the queue. |
-| `match_found` | `{ "match_id": "...", "player_id": "p1", "opponent_id": "p2", "opponent_name": "Bob", "bet_amount": 1.5, "bet_token": "SOL" }` | Two players were paired; both are notified simultaneously. |
+| `match_found` | `{ "match_id": "...", "player_id": "p1", "opponent_id": "p2", "opponent_name": "Bob", "bet_amount": 1.5, "bet_token": "SOL", "queue_delta_ms": 12 }` | Two players were paired; both are notified simultaneously. `queue_delta_ms` shows the millisecond gap between the players' join events. |
 | `score_update` | `{ "match_id": "...", "scores": {"p1": 1, "p2": 0}, "updated_player_id": "p1", "correct": true, "question_id": "q1", "round_number": 1 }` | Current scoreboard after an answer. |
 | `opponent_answer` | `{ "match_id": "...", "player_id": "p1", "question_id": "q1", "answer": "42", "round_number": 1, "correct": true }` | Optional mirror of the opponent's submission for richer UX. |
 | `opponent_left` | `{ "match_id": "...", "opponent_id": "p2" }` | Sent if the opponent disconnects mid-match. |
@@ -74,6 +74,22 @@ All frames are UTF-8 JSON encoded envelopes:
 - Run tests: `go test ./...`
 
 Unit tests cover matchmaking, score tracking, and disconnect handling logic without requiring live WebSocket connections.
+
+## Matchmaking algorithm
+
+The lobby keeps an ordered, concurrency-safe queue. Each time a player taps “Play”, the server records:
+
+- The precise `time.Now()` timestamp (monotonic on supported platforms).
+- A monotonically increasing sequence number to break ties when two players arrive within the same millisecond.
+
+Players are inserted into the queue in ascending timestamp/sequence order. Whenever a player joins, the lobby scans from the head of the queue to find the earliest compatible opponent (bet amount/token). Once a pair is found:
+
+1. Both players are atomically popped from the queue.
+2. A new match is created with a UUIDv4 `match_id`, and both clients share that identifier for the rest of the session and any settlement logic.
+3. The millisecond delta between the two click times is captured and returned in the `match_found` payload as `queue_delta_ms` (and logged) so operators can audit fairness.
+4. If either player disconnects, the server broadcasts `opponent_left` followed by `game_over` including the same `match_id`, ensuring the survivor and any observers can close out the match cleanly.
+
+This strategy guarantees “first click, first served” ordering even under heavy concurrency, while remaining simple enough to remain fast at small queue sizes. When Valkey is configured the queue and session mutations are mirrored so multiple pods stay in sync.
 
 ## Docker
 

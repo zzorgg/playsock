@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestLobbyPairing(t *testing.T) {
@@ -29,6 +30,9 @@ func TestLobbyPairing(t *testing.T) {
 		}
 		if session.players["bob"].matchID != session.ID {
 			t.Fatalf("bob match id not set")
+		}
+		if session.queueGap < 0 {
+			t.Fatalf("queue gap should be non-negative, got %v", session.queueGap)
 		}
 	}
 }
@@ -215,5 +219,80 @@ func TestLobbyPersistsToValkeyStore(t *testing.T) {
 	}
 	if !foundAlice {
 		t.Fatalf("expected queueRemove to be called with alice")
+	}
+}
+
+func TestMatchFoundPayloadCarriesQueueDelta(t *testing.T) {
+	lobby := NewLobby(0, nil)
+
+	c1 := &Client{id: "alice", name: "Alice", send: make(chan []byte, 8)}
+	c2 := &Client{id: "bob", name: "Bob", send: make(chan []byte, 8)}
+
+	if _, session := lobby.enqueue(c1); session != nil {
+		t.Fatalf("unexpected session for first enqueue")
+	}
+
+	time.Sleep(5 * time.Millisecond)
+
+	if _, session := lobby.enqueue(c2); session == nil {
+		t.Fatalf("expected session when second player joins")
+	} else {
+		lobby.notifyMatchFound(session)
+	}
+
+	select {
+	case msg := <-c1.send:
+		var env Envelope
+		if err := json.Unmarshal(msg, &env); err != nil {
+			t.Fatalf("invalid json: %v", err)
+		}
+		if env.Action != ActionMatchFound {
+			t.Fatalf("expected match_found action, got %s", env.Action)
+		}
+		var payload matchFoundPayload
+		if err := json.Unmarshal(env.Data, &payload); err != nil {
+			t.Fatalf("invalid payload: %v", err)
+		}
+		if payload.QueueDeltaMs < 0 {
+			t.Fatalf("expected non-negative queue delta, got %d", payload.QueueDeltaMs)
+		}
+		if payload.MatchID == "" {
+			t.Fatalf("expected match id to be populated")
+		}
+	default:
+		t.Fatalf("expected match_found message for alice")
+	}
+}
+
+func TestMatchQueueTieBreaksBySequence(t *testing.T) {
+	queue := newMatchQueue(4)
+
+	now := time.Now()
+
+	c1 := &Client{id: "alice"}
+	c2 := &Client{id: "bob"}
+
+	first := &queueItem{client: c1, joinedAt: now, sequence: 1}
+	second := &queueItem{client: c2, joinedAt: now, sequence: 2}
+
+	idxFirst := queue.insert(first)
+	idxSecond := queue.insert(second)
+
+	if idxFirst != 0 {
+		t.Fatalf("expected first insert index 0, got %d", idxFirst)
+	}
+	if idxSecond != 1 {
+		t.Fatalf("expected second insert index 1, got %d", idxSecond)
+	}
+
+	items := queue.items()
+	if len(items) != 2 {
+		t.Fatalf("expected two items, got %d", len(items))
+	}
+	if items[0].client != c1 {
+		t.Fatalf("expected alice first in queue")
+	}
+	if items[1].client != c2 {
+		t.Fatalf("expected bob second in queue")
 	}
 }

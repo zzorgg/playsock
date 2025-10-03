@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -77,6 +78,7 @@ type matchFoundPayload struct {
 	BetAmount      *float64 `json:"bet_amount,omitempty"`
 	BetToken       string   `json:"bet_token,omitempty"`
 	YouArePlayerID string   `json:"player_id"`
+	QueueDeltaMs   int64    `json:"queue_delta_ms"`
 }
 
 // submitAnswerPayload is received when a client submits an answer.
@@ -231,16 +233,17 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 // Lobby orchestrates matchmaking and active sessions.
 type Lobby struct {
 	mu           sync.Mutex
-	queue        []*Client
+	queue        *matchQueue
 	sessions     map[string]*Session
 	queueTimeout time.Duration
 	store        valkeyStore
+	sequence     uint64
 }
 
 // NewLobby creates a lobby ready to accept players.
 func NewLobby(queueTimeout time.Duration, store valkeyStore) *Lobby {
 	return &Lobby{
-		queue:        make([]*Client, 0, 64),
+		queue:        newMatchQueue(64),
 		sessions:     make(map[string]*Session),
 		queueTimeout: queueTimeout,
 		store:        store,
@@ -438,6 +441,8 @@ type Session struct {
 	betAmount *float64
 	betToken  string
 	created   time.Time
+	queueGap  time.Duration
+	pairedAt  time.Time
 }
 
 func newSession(c1, c2 *Client) *Session {
@@ -452,6 +457,7 @@ func newSession(c1, c2 *Client) *Session {
 		betAmount: betAmount,
 		betToken:  betToken,
 		created:   time.Now(),
+		pairedAt:  time.Now(),
 	}
 	c1.matchID = id
 	c2.matchID = id
@@ -463,53 +469,58 @@ func (l *Lobby) enqueue(c *Client) (position int, session *Session) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	now := time.Now()
+
 	if l.store != nil {
 		if err := l.store.queueRemove(c.id); err != nil {
 			log.Printf("valkey queueRemove failed for %s: %v", c.id, err)
 		}
 	}
 
-	// Remove if already queued to avoid duplicates after reconnect attempts.
-	for i, existing := range l.queue {
-		if existing == c {
-			l.queue = append(l.queue[:i], l.queue[i+1:]...)
-			break
-		}
+	if removed := l.queue.removeByID(c.id); removed != nil {
+		removed.client.matchID = ""
 	}
 
-	// Attempt to find a compatible opponent.
-	for i, opponent := range l.queue {
-		if opponent == nil || opponent.id == c.id {
-			continue
+	c.joinedAt = now
+	item := &queueItem{
+		client:   c,
+		joinedAt: now,
+		sequence: atomic.AddUint64(&l.sequence, 1),
+	}
+
+	positionIdx := l.queue.insert(item)
+
+	session, first, second := l.tryMatchLocked()
+	if session != nil {
+		gap := second.joinedAt.Sub(first.joinedAt)
+		if gap < 0 {
+			gap = -gap
 		}
-		if compatibleBets(opponent.betAmount, c.betAmount, opponent.betToken, c.betToken) {
-			// Remove opponent from queue
-			l.queue = append(l.queue[:i], l.queue[i+1:]...)
-			session := newSession(opponent, c)
-			l.sessions[session.ID] = session
-			if l.store != nil {
-				if err := l.store.queueRemove(opponent.id); err != nil {
-					log.Printf("valkey queueRemove failed for %s: %v", opponent.id, err)
-				}
-				if err := l.store.queueRemove(c.id); err != nil {
-					log.Printf("valkey queueRemove failed for %s: %v", c.id, err)
-				}
-				if err := l.store.sessionSave(sessionRecordFromSession(session)); err != nil {
-					log.Printf("valkey sessionSave failed for %s: %v", session.ID, err)
+		session.queueGap = gap
+		session.pairedAt = time.Now()
+		l.sessions[session.ID] = session
+
+		if l.store != nil {
+			for _, id := range []string{first.client.id, second.client.id} {
+				if err := l.store.queueRemove(id); err != nil {
+					log.Printf("valkey queueRemove failed for %s: %v", id, err)
 				}
 			}
-			return 0, session
+			if err := l.store.sessionSave(sessionRecordFromSession(session)); err != nil {
+				log.Printf("valkey sessionSave failed for %s: %v", session.ID, err)
+			}
 		}
+
+		log.Printf("paired %s vs %s (Δ %dms)", first.client.id, second.client.id, gap.Milliseconds())
+		return 0, session
 	}
 
-	c.joinedAt = time.Now()
-	l.queue = append(l.queue, c)
 	if l.store != nil {
 		if err := l.store.queueAdd(queueEntryFromClient(c)); err != nil {
 			log.Printf("valkey queueAdd failed for %s: %v", c.id, err)
 		}
 	}
-	return len(l.queue), nil
+	return positionIdx + 1, nil
 }
 
 func (l *Lobby) notifyMatchFound(s *Session) {
@@ -529,6 +540,7 @@ func (l *Lobby) notifyMatchFound(s *Session) {
 			BetAmount:      s.betAmount,
 			BetToken:       s.betToken,
 			YouArePlayerID: playerID,
+			QueueDeltaMs:   s.queueGap.Milliseconds(),
 		})
 	}
 }
@@ -593,16 +605,11 @@ func (l *Lobby) handleDisconnect(c *Client, reason string) {
 	defer l.mu.Unlock()
 
 	// Remove from queue if present.
-	for i, queued := range l.queue {
-		if queued == c {
-			l.queue = append(l.queue[:i], l.queue[i+1:]...)
-			break
-		}
-	}
-
-	if l.store != nil {
-		if err := l.store.queueRemove(c.id); err != nil {
-			log.Printf("valkey queueRemove failed for %s: %v", c.id, err)
+	if l.queue.removeByID(c.id) != nil {
+		if l.store != nil {
+			if err := l.store.queueRemove(c.id); err != nil {
+				log.Printf("valkey queueRemove failed for %s: %v", c.id, err)
+			}
 		}
 	}
 
@@ -688,6 +695,32 @@ func (l *Lobby) finishMatchLocked(session *Session, reason string) {
 		client.matchID = ""
 		client.sendEnvelope(ActionGameOver, payload)
 	}
+}
+
+func (l *Lobby) tryMatchLocked() (*Session, *queueItem, *queueItem) {
+	entries := l.queue.items()
+	for i := 0; i < len(entries); i++ {
+		first := entries[i]
+		if first == nil {
+			continue
+		}
+		for j := i + 1; j < len(entries); j++ {
+			second := entries[j]
+			if second == nil {
+				continue
+			}
+			if first.client.id == second.client.id {
+				continue
+			}
+			if compatibleBets(first.client.betAmount, second.client.betAmount, first.client.betToken, second.client.betToken) {
+				l.queue.removeByID(first.client.id)
+				l.queue.removeByID(second.client.id)
+				session := newSession(first.client, second.client)
+				return session, first, second
+			}
+		}
+	}
+	return nil, nil, nil
 }
 
 func (s *Session) otherPlayer(id string) *Client {
